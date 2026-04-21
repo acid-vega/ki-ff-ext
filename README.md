@@ -14,8 +14,7 @@ Die Erweiterung fügt ein Kontextmenü hinzu, mit dem markierter Text oder der g
 - Funktioniert in:
   - `textarea`
   - Text-`input`-Feldern
-  - `contenteditable`-Feldern
-  - vielen Rich-Text-Editoren wie z. B. CKEditor
+  - `contenteditable`-Fe
 - Speicherung von:
   - OpenAI API-Key
   - gewünschtem Modell
