@@ -145,3 +145,5 @@ Besonders interessant:
 - robustere Auswahl-/Einfügelogik
 - bessere UX in der Optionsseite
 - Tests für unterschiedliche Webseiten und Eingabefelder
+
+Build by acid-vega & ki
