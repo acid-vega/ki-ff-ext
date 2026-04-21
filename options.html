@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <title>Textarea OpenAI Rewriter – Optionen</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #ffffff;
+      --bg-soft: #f5f7fb;
+      --text: #1f2937;
+      --border: #d1d5db;
+      --accent: #2563eb;
+      --accent-hover: #1d4ed8;
+      --danger: #b91c1c;
+      --success: #166534;
+      --error: #991b1b;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #111827;
+        --bg-soft: #1f2937;
+        --text: #f3f4f6;
+        --border: #374151;
+        --accent: #60a5fa;
+        --accent-hover: #93c5fd;
+        --danger: #f87171;
+        --success: #4ade80;
+        --error: #fca5a5;
+      }
+    }
+
+    body {
+      margin: 0;
+      font: 14px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    .wrap {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 24px;
+    }
+
+    .card {
+      background: var(--bg-soft);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 24px;
+    }
+
+    p {
+      margin: 0 0 16px;
+    }
+
+    .field {
+      margin-bottom: 16px;
+    }
+
+    label {
+      display: block;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+
+    input,
+    select,
+    button {
+      font: inherit;
+    }
+
+    input,
+    select {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    .actions {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 20px;
+    }
+
+    button {
+      border: 0;
+      border-radius: 8px;
+      padding: 10px 14px;
+      cursor: pointer;
+    }
+
+    button[type="submit"] {
+      background: var(--accent);
+      color: white;
+    }
+
+    button[type="submit"]:hover {
+      background: var(--accent-hover);
+    }
+
+    .secondary {
+      background: transparent;
+      color: var(--danger);
+      border: 1px solid var(--border);
+    }
+
+    button:disabled {
+      opacity: 0.65;
+      cursor: wait;
+    }
+
+    .status {
+      margin-top: 16px;
+      min-height: 22px;
+      font-weight: 600;
+    }
+
+    .status.success {
+      color: var(--success);
+    }
+
+    .status.error {
+      color: var(--error);
+    }
+
+    .hint {
+      font-size: 13px;
+      opacity: 0.85;
+    }
+
+    ul {
+      padding-left: 18px;
+      margin: 16px 0 0;
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <div class="card">
+      <h1>Textarea OpenAI Rewriter</h1>
+      <p>Hier kannst du deinen OpenAI API-Key lokal in Firefox speichern und das Modell auswählen.</p>
+
+      <form id="settings-form">
+        <div class="field">
+          <label for="apiKey">OpenAI API-Key</label>
+          <input
+            id="apiKey"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="sk-..."
+          >
+          <div class="hint">Der Key wird lokal über <code>browser.storage.local</code> gespeichert.</div>
+        </div>
+
+        <div class="field">
+          <label for="model">Modell</label>
+          <select id="model"></select>
+          <div class="hint">Dieses Modell wird für Rechtschreibung, Optimieren und Prompt verwendet.</div>
+        </div>
+
+        <div class="actions">
+          <!-- FEATURE: API-Key testen und speichern -->
+          <button type="submit">API-Key testen und speichern</button>
+          <button id="deleteButton" class="secondary" type="button">API-Key löschen</button>
+        </div>
+
+        <p id="status" class="status" role="status" aria-live="polite"></p>
+      </form>
+
+      <ul>
+        <li><strong>Rechtschreibung</strong>: Korrigiert nur Rechtschreibung, Grammatik und Zeichensetzung.</li>
+        <li><strong>Optimieren</strong>: Verbessert den Text sprachlich.</li>
+        <li><strong>Prompt</strong>: Der markierte Text bzw. komplette Feldinhalt wird direkt als Prompt an die API gesendet.</li>
+        <li><strong>Strg+Z</strong>: Nach dem Ersetzen kannst du zum Original zurückspringen.</li>
+      </ul>
+    </div>
+  </main>
+
+  <script src="background.js"></script>
+</body>
+</html>

@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "OpenAI Rewriter",
+  "version": "0.3",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "kiffext@h9k.wtf"
+    }
+  },
+  "description": "Schickt Text aus Textfeldern oder markierten Bereichen an die OpenAI API und ersetzt den Inhalt.",
+  "permissions": [
+    "contextMenus",
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>",
+    "https://api.openai.com/*"
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
+
