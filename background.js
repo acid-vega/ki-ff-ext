@@ -8,28 +8,35 @@ const IS_OPTIONS_PAGE =
 const MENU_ROOT_ID = "rewrite-with-openai-root";
 const MENU_SPELLING_ID = "rewrite-with-openai-spelling";
 const MENU_OPTIMIZE_ID = "rewrite-with-openai-optimize";
+const MENU_NICER_ID = "rewrite-with-openai-nicer";
 const MENU_PROMPT_ID = "rewrite-with-openai-prompt";
 
 const STORAGE_API_KEY = "openaiApiKey";
 const STORAGE_MODEL = "openaiModel";
 
-// FEATURE: Modell-Auswahl in den Erweiterungsoptionen
-const AVAILABLE_MODELS = [
-  {
-    value: "gpt-4o-mini",
-    label: "GPT-4o mini – schnell & günstig"
-  },
+// FEATURE: Fallback-Modelle bleiben verfügbar, falls die Live-Abfrage fehlschlägt
+const FALLBACK_MODELS = [
   {
     value: "gpt-4.1-mini",
-    label: "GPT-4.1 mini – Standard"
+    label: "GPT-4.1 mini – empfohlen"
   },
   {
     value: "gpt-4.1",
     label: "GPT-4.1 – stärker"
+  },
+  {
+    value: "gpt-4o-mini",
+    label: "GPT-4o mini – schnell"
   }
 ];
 
 const DEFAULT_OPENAI_MODEL = "gpt-4.1-mini";
+
+// FEATURE: Cache für live geladene Textmodelle aus der API
+let availableModelsCache = [...FALLBACK_MODELS];
+let loadedModelCatalogApiKey = "";
+let dynamicModelCatalogLoadedAt = 0;
+let pendingModelCatalogPromise = null;
 
 const PRESET_PROMPTS = {
   [MENU_SPELLING_ID]: [
@@ -40,6 +47,11 @@ const PRESET_PROMPTS = {
   [MENU_OPTIMIZE_ID]: [
     "Optimiere den folgenden Text sprachlich.",
     "Verbessere Klarheit, Stil, Lesbarkeit, Grammatik und Struktur, ohne die Kernaussage zu verändern.",
+    "Gib nur den finalen Text zurück, ohne Kommentare oder Erklärungen."
+  ].join(" "),
+  [MENU_NICER_ID]: [
+    "Optimiere den folgenden Text sprachlich.",
+    "Verbessere Klarheit, Stil, Lesbarkeit, Grammatik des Textes benutze Farbigemetaphern, der Text soll die gleiche aussage haben muss aber nicht 1 zu1 dem Original entsprechen.",
     "Gib nur den finalen Text zurück, ohne Kommentare oder Erklärungen."
   ].join(" ")
 };
@@ -108,6 +120,13 @@ async function createContextMenus() {
   });
 
   browser.contextMenus.create({
+    id: MENU_NICER_ID,
+    parentId: MENU_ROOT_ID,
+    title: "Ausschmücken",
+    contexts: ["editable", "selection"]
+  });
+
+  browser.contextMenus.create({
     id: MENU_PROMPT_ID,
     parentId: MENU_ROOT_ID,
     title: "Prompt",
@@ -120,7 +139,7 @@ async function handleContextMenuClick(info, tab) {
     return;
   }
 
-  if (![MENU_SPELLING_ID, MENU_OPTIMIZE_ID, MENU_PROMPT_ID].includes(info.menuItemId)) {
+  if (![MENU_SPELLING_ID, MENU_OPTIMIZE_ID, MENU_NICER_ID, MENU_PROMPT_ID].includes(info.menuItemId)) {
     return;
   }
 
@@ -180,11 +199,10 @@ async function getStoredSettings() {
   };
 }
 
+// FEATURE: Modellwerte nicht mehr auf eine harte Liste beschränken, sondern Textmodelle allgemein erlauben
 function normalizeModel(model) {
   const value = String(model || "").trim();
-  return AVAILABLE_MODELS.some((entry) => entry.value === value)
-    ? value
-    : DEFAULT_OPENAI_MODEL;
+  return isSelectableTextModelId(value) ? value : DEFAULT_OPENAI_MODEL;
 }
 
 // FEATURE: Gemeinsame OpenAI-Anfrage für Umschreiben und Testen
@@ -392,19 +410,29 @@ async function showTabMessage(tabId, message, isError = false) {
 async function initOptionsPage() {
   const apiKeyInput = document.getElementById("apiKey");
   const modelSelect = document.getElementById("model");
+  const modelRefreshButton = document.getElementById("modelRefreshButton");
+  const modelInfoEl = document.getElementById("modelInfo");
   const settingsForm = document.getElementById("settings-form");
   const deleteButton = document.getElementById("deleteButton");
   const statusEl = document.getElementById("status");
 
-  if (!apiKeyInput || !modelSelect || !settingsForm || !deleteButton || !statusEl) {
+  if (
+    !apiKeyInput ||
+    !modelSelect ||
+    !modelRefreshButton ||
+    !modelInfoEl ||
+    !settingsForm ||
+    !deleteButton ||
+    !statusEl
+  ) {
     throw new Error("Optionsseite konnte nicht initialisiert werden.");
   }
 
-  populateModelSelect(modelSelect);
-
   const savedSettings = await getStoredSettings();
   apiKeyInput.value = savedSettings.openaiApiKey;
-  modelSelect.value = savedSettings.openaiModel;
+
+  // FEATURE: Zuerst Fallback anzeigen, danach bei vorhandenem API-Key die Live-Liste laden
+  populateModelSelect(modelSelect, getKnownModelOptions(), savedSettings.openaiModel);
 
   setOptionsStatus(
     statusEl,
@@ -413,6 +441,66 @@ async function initOptionsPage() {
       : "Noch kein API-Key gespeichert.",
     savedSettings.openaiApiKey ? "success" : ""
   );
+
+  setModelInfo(
+    modelInfoEl,
+    savedSettings.openaiApiKey
+      ? "Beim Öffnen der Modellauswahl werden kompatible Textmodelle live von der API geladen."
+      : "Mit einem API-Key kannst du die kompatiblen Textmodelle live von der API laden."
+  );
+
+  let isSubmitting = false;
+  let isLoadingModels = false;
+
+  updateControls();
+
+  if (savedSettings.openaiApiKey) {
+    await refreshModelCatalog({
+      preserveSelection: savedSettings.openaiModel,
+      showStatus: false
+    });
+  }
+
+  // FEATURE: Bei Änderung des API-Keys Live-Liste zurücksetzen, damit beim nächsten Öffnen neu geladen wird
+  apiKeyInput.addEventListener("input", () => {
+    if (String(apiKeyInput.value || "").trim() !== loadedModelCatalogApiKey) {
+      availableModelsCache = [...FALLBACK_MODELS];
+      loadedModelCatalogApiKey = "";
+      dynamicModelCatalogLoadedAt = 0;
+
+      populateModelSelect(modelSelect, getKnownModelOptions(), modelSelect.value || savedSettings.openaiModel);
+      setModelInfo(
+        modelInfoEl,
+        String(apiKeyInput.value || "").trim()
+          ? "API-Key geändert. Öffne die Modellauswahl oder lade die Modellliste neu."
+          : "Mit einem API-Key kannst du die kompatiblen Textmodelle live von der API laden."
+      );
+    }
+
+    updateControls();
+  });
+
+  // FEATURE: Live-Abfrage beim Auswählen des Modells
+  modelSelect.addEventListener("focus", () => {
+    const apiKey = String(apiKeyInput.value || "").trim();
+    if (!apiKey || hasFreshModelCatalogForKey(apiKey)) {
+      return;
+    }
+
+    refreshModelCatalog({
+      preserveSelection: modelSelect.value,
+      showStatus: false
+    }).catch(console.error);
+  });
+
+  // FEATURE: Manuelles Neuladen der Modellliste
+  modelRefreshButton.addEventListener("click", async () => {
+    await refreshModelCatalog({
+      preserveSelection: modelSelect.value,
+      forceReload: true,
+      showStatus: true
+    });
+  });
 
   settingsForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -426,7 +514,8 @@ async function initOptionsPage() {
       return;
     }
 
-    toggleOptionsBusy(true);
+    isSubmitting = true;
+    updateControls();
     setOptionsStatus(statusEl, "API-Key und Modell werden getestet ...", "");
 
     try {
@@ -445,50 +534,364 @@ async function initOptionsPage() {
     } catch (error) {
       setOptionsStatus(statusEl, "Test fehlgeschlagen: " + error.message, "error");
     } finally {
-      toggleOptionsBusy(false);
+      isSubmitting = false;
+      updateControls();
     }
   });
 
   deleteButton.addEventListener("click", async () => {
-    toggleOptionsBusy(true);
+    isSubmitting = true;
+    updateControls();
 
     try {
       await browser.storage.local.remove(STORAGE_API_KEY);
 
       apiKeyInput.value = "";
+      availableModelsCache = [...FALLBACK_MODELS];
+      loadedModelCatalogApiKey = "";
+      dynamicModelCatalogLoadedAt = 0;
+
+      populateModelSelect(modelSelect, getKnownModelOptions(), modelSelect.value || DEFAULT_OPENAI_MODEL);
+      setModelInfo(
+        modelInfoEl,
+        "API-Key gelöscht. Es werden nur noch die eingebauten Fallback-Textmodelle angezeigt."
+      );
       setOptionsStatus(statusEl, "Gespeicherter API-Key wurde gelöscht.", "success");
       apiKeyInput.focus();
     } catch (error) {
       setOptionsStatus(statusEl, "Löschen fehlgeschlagen: " + error.message, "error");
     } finally {
-      toggleOptionsBusy(false);
+      isSubmitting = false;
+      updateControls();
     }
   });
 
-  function toggleOptionsBusy(isBusy) {
-    apiKeyInput.disabled = isBusy;
+  function updateControls() {
+    const isBusy = isSubmitting || isLoadingModels;
+    const hasApiKey = !!String(apiKeyInput.value || "").trim();
+
+    apiKeyInput.disabled = isSubmitting;
     modelSelect.disabled = isBusy;
     deleteButton.disabled = isBusy;
+    modelRefreshButton.disabled = isBusy || !hasApiKey;
 
     const submitButton = settingsForm.querySelector('button[type="submit"]');
     if (submitButton) {
       submitButton.disabled = isBusy;
     }
   }
+
+  async function refreshModelCatalog({
+    preserveSelection = DEFAULT_OPENAI_MODEL,
+    forceReload = false,
+    showStatus = true
+  } = {}) {
+    const apiKey = String(apiKeyInput.value || "").trim();
+
+    if (!apiKey) {
+      setOptionsStatus(statusEl, "Bitte zuerst einen OpenAI API-Key eingeben.", "error");
+      apiKeyInput.focus();
+      return;
+    }
+
+    if (!forceReload && hasFreshModelCatalogForKey(apiKey)) {
+      populateModelSelect(modelSelect, getKnownModelOptions(), preserveSelection);
+      return;
+    }
+
+    isLoadingModels = true;
+    updateControls();
+    setModelInfo(modelInfoEl, "Kompatible Textmodelle werden von der API geladen ...");
+
+    if (showStatus) {
+      setOptionsStatus(statusEl, "Modellliste wird geladen ...", "");
+    }
+
+    try {
+      const liveModels = await fetchAvailableModels(apiKey);
+      populateModelSelect(modelSelect, liveModels, preserveSelection);
+
+      setModelInfo(
+        modelInfoEl,
+        `${liveModels.length} kompatible Textmodelle geladen. Bild-, Audio-, Embedding- und DALL·E-Modelle werden ausgeblendet.`
+      );
+
+      if (showStatus) {
+        setOptionsStatus(statusEl, "Modellliste erfolgreich aktualisiert.", "success");
+      }
+    } catch (error) {
+      populateModelSelect(modelSelect, getKnownModelOptions(), preserveSelection);
+      setModelInfo(
+        modelInfoEl,
+        "Modellliste konnte nicht geladen werden. Es wird die eingebaute Fallback-Liste angezeigt."
+      );
+
+      if (showStatus) {
+        setOptionsStatus(statusEl, "Modellliste konnte nicht geladen werden: " + error.message, "error");
+      }
+    } finally {
+      isLoadingModels = false;
+      updateControls();
+    }
+  }
 }
 
-function populateModelSelect(selectEl) {
+// FEATURE: Holt die verfügbaren Modelle von der OpenAI API und filtert unpassende Typen aus
+async function fetchAvailableModels(apiKey) {
+  const trimmedApiKey = String(apiKey || "").trim();
+
+  if (!trimmedApiKey) {
+    throw new Error("Es wurde kein API-Key angegeben.");
+  }
+
+  if (pendingModelCatalogPromise && loadedModelCatalogApiKey === trimmedApiKey) {
+    return pendingModelCatalogPromise;
+  }
+
+  loadedModelCatalogApiKey = trimmedApiKey;
+
+  pendingModelCatalogPromise = (async () => {
+    const res = await fetch("https://api.openai.com/v1/models", {
+      method: "GET",
+      headers: {
+        "Authorization": `Bearer ${trimmedApiKey}`
+      }
+    });
+
+    const rawText = await res.text();
+    let data = null;
+
+    try {
+      data = rawText ? JSON.parse(rawText) : null;
+    } catch (error) {
+      throw new Error("Die Modellliste konnte nicht als JSON gelesen werden.");
+    }
+
+    if (!res.ok) {
+      const apiError =
+        data?.error?.message ||
+        data?.message ||
+        rawText ||
+        `HTTP ${res.status}`;
+
+      throw new Error(`OpenAI API Fehler: ${res.status} ${apiError}`);
+    }
+
+    const liveModels = Array.isArray(data?.data)
+      ? data.data
+          .map((entry) => String(entry?.id || "").trim())
+          .filter(Boolean)
+          .filter(isSelectableTextModelId)
+          .map((modelId) => ({
+            value: modelId,
+            label: buildModelLabel(modelId)
+          }))
+      : [];
+
+    const merged = mergeUniqueModelOptions([...liveModels, ...FALLBACK_MODELS]);
+    const sorted = sortModelOptions(merged);
+
+    if (!sorted.length) {
+      throw new Error("Es wurden keine kompatiblen Textmodelle gefunden.");
+    }
+
+    availableModelsCache = sorted;
+    dynamicModelCatalogLoadedAt = Date.now();
+
+    return sorted;
+  })();
+
+  try {
+    return await pendingModelCatalogPromise;
+  } finally {
+    pendingModelCatalogPromise = null;
+  }
+}
+
+function getKnownModelOptions() {
+  return mergeUniqueModelOptions([...availableModelsCache, ...FALLBACK_MODELS]);
+}
+
+// FEATURE: Filtert DALL·E, Audio-, Embedding- und ähnliche Spezialmodelle aus
+function isSelectableTextModelId(modelId) {
+  const value = String(modelId || "").trim().toLowerCase();
+
+  if (!value) {
+    return false;
+  }
+
+  const blockedTokens = [
+    "dall-e",
+    "gpt-image",
+    "image",
+    "whisper",
+    "tts",
+    "transcribe",
+    "speech",
+    "audio",
+    "embedding",
+    "embed",
+    "moderation",
+    "rerank",
+    "search",
+    "realtime",
+    "computer-use",
+    "vision-preview",
+    "sora"
+  ];
+
+  if (blockedTokens.some((token) => value.includes(token))) {
+    return false;
+  }
+
+  return /^(gpt-|chatgpt|o1|o3|o4|codex)/.test(value);
+}
+
+function buildModelLabel(modelId) {
+  const value = String(modelId || "").trim();
+  const baseId = stripModelDateSuffix(value);
+  const details = [];
+
+  if (baseId === DEFAULT_OPENAI_MODEL) {
+    details.push("empfohlen");
+  }
+
+  if (/^o[134]/i.test(baseId)) {
+    details.push("Reasoning");
+  }
+
+  if (/preview/i.test(value)) {
+    details.push("Preview");
+  }
+
+  if (/latest/i.test(value)) {
+    details.push("Alias");
+  }
+
+  const dateMatch = value.match(/(\d{4}-\d{2}-\d{2})$/);
+  if (dateMatch) {
+    details.push(dateMatch[1]);
+  }
+
+  return `${prettifyModelName(baseId)}${details.length ? " – " + details.join(", ") : ""}`;
+}
+
+function prettifyModelName(modelId) {
+  return String(modelId || "")
+    .trim()
+    .replace(/^gpt-/i, "GPT-")
+    .replace(/^chatgpt/i, "ChatGPT")
+    .replace(/^codex/i, "Codex")
+    .replace(/-/g, " ")
+    .replace(/\bpreview\b/gi, "Preview")
+    .replace(/\blatest\b/gi, "latest");
+}
+
+function stripModelDateSuffix(modelId) {
+  return String(modelId || "").replace(/-\d{4}-\d{2}-\d{2}$/i, "");
+}
+
+function mergeUniqueModelOptions(modelOptions) {
+  const map = new Map();
+
+  for (const option of modelOptions || []) {
+    const value = String(option?.value || "").trim();
+
+    if (!isSelectableTextModelId(value) || map.has(value)) {
+      continue;
+    }
+
+    map.set(value, {
+      value,
+      label: String(option?.label || buildModelLabel(value)).trim()
+    });
+  }
+
+  return Array.from(map.values());
+}
+
+function sortModelOptions(modelOptions) {
+  const priorityOrder = [
+    "gpt-4.1-mini",
+    "gpt-4.1",
+    "gpt-4o-mini",
+    "gpt-4o",
+    "o4-mini",
+    "o4",
+    "o3-mini",
+    "o3",
+    "o1-mini",
+    "o1"
+  ];
+
+  return [...modelOptions].sort((a, b) => {
+    const baseA = stripModelDateSuffix(a.value);
+    const baseB = stripModelDateSuffix(b.value);
+    const rankA = priorityOrder.indexOf(baseA);
+    const rankB = priorityOrder.indexOf(baseB);
+
+    if (rankA !== rankB) {
+      return (rankA === -1 ? 999 : rankA) - (rankB === -1 ? 999 : rankB);
+    }
+
+    const hasDateA = baseA !== a.value;
+    const hasDateB = baseB !== b.value;
+
+    if (baseA === baseB && hasDateA !== hasDateB) {
+      return hasDateA ? 1 : -1;
+    }
+
+    return a.value.localeCompare(b.value, "de", { numeric: true, sensitivity: "base" });
+  });
+}
+
+function hasFreshModelCatalogForKey(apiKey) {
+  const trimmedApiKey = String(apiKey || "").trim();
+
+  return (
+    !!trimmedApiKey &&
+    loadedModelCatalogApiKey === trimmedApiKey &&
+    dynamicModelCatalogLoadedAt > 0
+  );
+}
+
+function populateModelSelect(selectEl, modelOptions = getKnownModelOptions(), selectedValue = DEFAULT_OPENAI_MODEL) {
+  const options = mergeUniqueModelOptions(modelOptions);
+  const normalizedSelected = normalizeModel(selectedValue);
+
+  // FEATURE: Gespeichertes Modell sichtbar halten, auch wenn es nicht in der aktuellen Live-Liste steckt
+  if (
+    normalizedSelected &&
+    isSelectableTextModelId(normalizedSelected) &&
+    !options.some((entry) => entry.value === normalizedSelected)
+  ) {
+    options.unshift({
+      value: normalizedSelected,
+      label: `${buildModelLabel(normalizedSelected)} – gespeichert`
+    });
+  }
+
+  const sortedOptions = sortModelOptions(options);
+  const finalOptions = sortedOptions.length ? sortedOptions : [...FALLBACK_MODELS];
+
   selectEl.innerHTML = "";
 
-  for (const model of AVAILABLE_MODELS) {
+  for (const model of finalOptions) {
     const option = document.createElement("option");
     option.value = model.value;
     option.textContent = model.label;
     selectEl.appendChild(option);
   }
+
+  const selectedExists = finalOptions.some((entry) => entry.value === normalizedSelected);
+  selectEl.value = selectedExists ? normalizedSelected : DEFAULT_OPENAI_MODEL;
 }
 
 function setOptionsStatus(statusEl, message, type = "") {
   statusEl.textContent = message;
   statusEl.className = type ? `status ${type}` : "status";
+}
+
+function setModelInfo(infoEl, message) {
+  infoEl.textContent = message;
 }
